@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -11,12 +12,53 @@ from app.config import settings
 
 
 # ============================================================
+# General helpers
+# ============================================================
+
+def normalize_email(email: str) -> str:
+    """
+    Normalize email before saving or comparing.
+
+    Keeps auth consistent by removing spaces and lowercasing.
+    """
+
+    if not email:
+        return ""
+
+    return email.strip().lower()
+
+
+def is_password_strong_enough(password: str) -> bool:
+    """
+    Basic password strength validation.
+
+    Requirement:
+    - At least 8 characters
+    - At least one letter
+    - At least one number
+    """
+
+    if not password:
+        return False
+
+    if len(password) < 8:
+        return False
+
+    has_letter = bool(re.search(r"[A-Za-z]", password))
+    has_number = bool(re.search(r"\d", password))
+
+    return has_letter and has_number
+
+
+# ============================================================
 # Password hashing
 # ============================================================
 # We use PBKDF2-SHA256 from Python standard library.
-# This avoids bcrypt/passlib compatibility issues on Vercel serverless.
-# Format:
+# This avoids bcrypt/passlib compatibility issues on Vercel.
+#
+# Stored format:
 #   pbkdf2_sha256$390000$salt_base64$hash_base64
+# ============================================================
 
 PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 390000
@@ -35,11 +77,9 @@ def _b64_decode(value: str) -> bytes:
 def hash_password(password: str) -> str:
     """
     Hash a plain password using PBKDF2-SHA256.
-
-    This is safe for production and avoids bcrypt deployment issues.
     """
 
-    if password is None:
+    if not password:
         raise ValueError("Password cannot be empty.")
 
     salt = secrets.token_bytes(SALT_BYTES)
@@ -61,7 +101,7 @@ def hash_password(password: str) -> str:
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Verify a plain password against stored password hash.
+    Verify a plain password against the stored password hash.
     """
 
     if not plain_password or not hashed_password:
@@ -95,6 +135,10 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         return False
 
 
+# Backward-compatible aliases in case any file uses old names later.
+get_password_hash = hash_password
+
+
 # ============================================================
 # JWT helpers
 # ============================================================
@@ -126,7 +170,7 @@ def create_access_token(
     }
 
     if email:
-        payload["email"] = email
+        payload["email"] = normalize_email(email)
 
     if role:
         payload["role"] = role
