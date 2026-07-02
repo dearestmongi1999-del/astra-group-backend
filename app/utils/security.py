@@ -1,55 +1,135 @@
+import base64
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from jose import JWTError, jwt
-from passlib.context import CryptContext
 
 from app.config import settings
 
 
-password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ============================================================
+# Password hashing
+# ============================================================
+# We use PBKDF2-SHA256 from Python standard library.
+# This avoids bcrypt/passlib compatibility issues on Vercel serverless.
+# Format:
+#   pbkdf2_sha256$390000$salt_base64$hash_base64
+
+PASSWORD_HASH_ALGORITHM = "pbkdf2_sha256"
+PBKDF2_ITERATIONS = 390000
+SALT_BYTES = 16
+
+
+def _b64_encode(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("utf-8").rstrip("=")
+
+
+def _b64_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
 
 
 def hash_password(password: str) -> str:
     """
-    Hash a plain-text password before saving it in the database.
+    Hash a plain password using PBKDF2-SHA256.
+
+    This is safe for production and avoids bcrypt deployment issues.
     """
-    return password_context.hash(password)
+
+    if password is None:
+        raise ValueError("Password cannot be empty.")
+
+    salt = secrets.token_bytes(SALT_BYTES)
+
+    password_hash = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        PBKDF2_ITERATIONS,
+    )
+
+    return (
+        f"{PASSWORD_HASH_ALGORITHM}"
+        f"${PBKDF2_ITERATIONS}"
+        f"${_b64_encode(salt)}"
+        f"${_b64_encode(password_hash)}"
+    )
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
-    Compare a plain-text password with the stored password hash.
+    Verify a plain password against stored password hash.
     """
-    return password_context.verify(plain_password, hashed_password)
 
+    if not plain_password or not hashed_password:
+        return False
+
+    try:
+        parts = hashed_password.split("$")
+
+        if len(parts) != 4:
+            return False
+
+        algorithm, iterations_text, salt_text, hash_text = parts
+
+        if algorithm != PASSWORD_HASH_ALGORITHM:
+            return False
+
+        iterations = int(iterations_text)
+        salt = _b64_decode(salt_text)
+        expected_hash = _b64_decode(hash_text)
+
+        actual_hash = hashlib.pbkdf2_hmac(
+            "sha256",
+            plain_password.encode("utf-8"),
+            salt,
+            iterations,
+        )
+
+        return hmac.compare_digest(actual_hash, expected_hash)
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# JWT helpers
+# ============================================================
 
 def create_access_token(
-    subject: str,
+    *,
+    subject: str | int,
+    email: str | None = None,
+    role: str | None = None,
     expires_delta: timedelta | None = None,
     extra_claims: dict[str, Any] | None = None,
 ) -> str:
     """
-    Create a signed JWT access token.
-
-    Args:
-        subject: Usually the user ID as a string.
-        expires_delta: Optional custom expiry.
-        extra_claims: Optional extra data such as email and role.
+    Create JWT access token.
     """
+
     now = datetime.now(timezone.utc)
-    expire = now + (
-        expires_delta
-        if expires_delta is not None
-        else timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
+
+    if expires_delta is None:
+        expires_delta = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+
+    expire = now + expires_delta
 
     payload: dict[str, Any] = {
         "sub": str(subject),
         "iat": int(now.timestamp()),
-        "exp": expire,
+        "exp": int(expire.timestamp()),
         "type": "access",
     }
+
+    if email:
+        payload["email"] = email
+
+    if role:
+        payload["role"] = role
 
     if extra_claims:
         payload.update(extra_claims)
@@ -61,44 +141,22 @@ def create_access_token(
     )
 
 
-def decode_access_token(token: str) -> dict[str, Any]:
+def decode_access_token(token: str) -> dict[str, Any] | None:
     """
-    Decode and validate a JWT access token.
+    Decode and validate JWT access token.
+    """
 
-    Raises JWTError if the token is invalid or expired.
-    """
     try:
         payload = jwt.decode(
             token,
             settings.JWT_SECRET_KEY,
             algorithms=[settings.JWT_ALGORITHM],
         )
+
+        if payload.get("type") != "access":
+            return None
+
+        return payload
+
     except JWTError:
-        raise
-
-    token_type = payload.get("type")
-    if token_type != "access":
-        raise JWTError("Invalid token type.")
-
-    return payload
-
-
-def normalize_email(email: str) -> str:
-    """
-    Normalize email addresses before saving or comparing.
-    """
-    return email.strip().lower()
-
-
-def is_password_strong_enough(password: str) -> bool:
-    """
-    Basic password strength check.
-    Keeps local development simple while preventing extremely weak passwords.
-    """
-    if len(password) < 8:
-        return False
-
-    has_letter = any(character.isalpha() for character in password)
-    has_number = any(character.isdigit() for character in password)
-
-    return has_letter and has_number
+        return None
