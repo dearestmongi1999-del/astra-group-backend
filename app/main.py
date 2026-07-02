@@ -1,3 +1,4 @@
+import os
 from contextlib import asynccontextmanager
 from importlib import import_module
 from importlib.util import find_spec
@@ -14,15 +15,68 @@ from app.database import Base, engine, test_database_connection
 
 
 # ---------------------------------------------------------
+# Runtime helpers
+# ---------------------------------------------------------
+def is_vercel_runtime() -> bool:
+    """
+    Detects if the app is running on Vercel.
+
+    Vercel deploys code under /var/task, which is read-only.
+    Any temporary runtime file writes should use /tmp instead.
+    """
+
+    current_file_path = str(Path(__file__).resolve())
+
+    return bool(
+        os.getenv("VERCEL")
+        or os.getenv("VERCEL_ENV")
+        or os.getenv("NOW_REGION")
+        or os.getenv("LAMBDA_TASK_ROOT")
+        or current_file_path.startswith("/var/task")
+    )
+
+
+# ---------------------------------------------------------
 # Uploads/static files
 # ---------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent.parent
-UPLOADS_DIR = BASE_DIR / "uploads"
+
+
+def get_uploads_dir() -> Path:
+    """
+    Returns the correct uploads directory for the current runtime.
+
+    Local:
+        backend/uploads
+
+    Vercel:
+        /tmp/uploads
+
+    Note:
+        /tmp on Vercel is temporary. For real production uploads,
+        we should later move image storage to Cloudinary or S3.
+    """
+
+    if is_vercel_runtime():
+        return Path("/tmp/uploads")
+
+    configured_uploads = Path(settings.UPLOADS_DIR)
+
+    if configured_uploads.is_absolute():
+        return configured_uploads
+
+    return BASE_DIR / configured_uploads
+
+
+UPLOADS_DIR = get_uploads_dir()
 
 
 def prepare_upload_directories() -> None:
     """
     Creates upload folders used by services, products, and banners.
+
+    This function is protected with try/except so the whole backend
+    does not crash if the runtime blocks filesystem writes.
     """
 
     folders = [
@@ -33,7 +87,33 @@ def prepare_upload_directories() -> None:
     ]
 
     for folder in folders:
-        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            print(f"Upload folder ready: {folder}")
+        except OSError as exc:
+            print(f"Upload folder creation failed/skipped: {folder} | {exc}")
+
+
+def mount_uploads(app: FastAPI) -> None:
+    """
+    Mounts uploaded files as /uploads.
+
+    If mounting fails, the app still starts. This is important on Vercel.
+    """
+
+    try:
+        prepare_upload_directories()
+
+        app.mount(
+            "/uploads",
+            StaticFiles(directory=str(UPLOADS_DIR)),
+            name="uploads",
+        )
+
+        print(f"Uploads mounted from: {UPLOADS_DIR}")
+
+    except Exception as exc:
+        print(f"Static uploads mount failed/skipped: {exc}")
 
 
 # ---------------------------------------------------------
@@ -74,13 +154,19 @@ def create_database_tables() -> None:
     """
     Automatically creates missing database tables.
 
-    This is useful for development. Later, for production, use Alembic
-    migrations instead of automatic create_all.
+    This is useful for development and early deployment.
+    Later, for production, use Alembic migrations instead of automatic create_all.
+
+    This function is protected so a database issue does not stop /health
+    from loading.
     """
 
-    load_models_for_table_creation()
-    Base.metadata.create_all(bind=engine)
-    print("Database tables checked/created successfully.")
+    try:
+        load_models_for_table_creation()
+        Base.metadata.create_all(bind=engine)
+        print("Database tables checked/created successfully.")
+    except Exception as exc:
+        print(f"Database table creation failed: {exc}")
 
 
 @asynccontextmanager
@@ -128,12 +214,7 @@ def create_app() -> FastAPI:
     # ---------------------------------------------------------
     # Static uploaded files
     # ---------------------------------------------------------
-    prepare_upload_directories()
-    app.mount(
-        "/uploads",
-        StaticFiles(directory=str(UPLOADS_DIR)),
-        name="uploads",
-    )
+    mount_uploads(app)
 
     # ---------------------------------------------------------
     # Basic Routes
@@ -148,6 +229,8 @@ def create_app() -> FastAPI:
             "docs": "/docs",
             "api_prefix": settings.API_V1_PREFIX,
             "uploads": "/uploads",
+            "runtime": "vercel" if is_vercel_runtime() else "local",
+            "uploads_dir": str(UPLOADS_DIR),
         }
 
     @app.get("/health", tags=["Health"])
@@ -156,6 +239,8 @@ def create_app() -> FastAPI:
             "success": True,
             "status": "healthy",
             "message": "Astra Group API is healthy.",
+            "runtime": "vercel" if is_vercel_runtime() else "local",
+            "uploads_dir": str(UPLOADS_DIR),
         }
 
     @app.get(f"{settings.API_V1_PREFIX}/health", tags=["Health"])
@@ -164,6 +249,7 @@ def create_app() -> FastAPI:
             "success": True,
             "status": "healthy",
             "message": "Astra Group API v1 is healthy.",
+            "runtime": "vercel" if is_vercel_runtime() else "local",
         }
 
     @app.get(f"{settings.API_V1_PREFIX}/db-health", tags=["Health"])
