@@ -54,7 +54,7 @@ def get_uploads_dir() -> Path:
 
     Note:
         /tmp on Vercel is temporary. For real production uploads,
-        we should later move image storage to Cloudinary or S3.
+        move image storage to Cloudinary, S3, Supabase Storage, etc.
     """
 
     if is_vercel_runtime():
@@ -69,6 +69,50 @@ def get_uploads_dir() -> Path:
 
 
 UPLOADS_DIR = get_uploads_dir()
+
+
+def get_api_prefix() -> str:
+    """
+    Returns a safe FastAPI API prefix.
+
+    Normal expected value:
+        /api/v1
+
+    Git Bash on Windows can sometimes convert:
+        /api/v1
+
+    into:
+        /C:/Program Files/Git/api/v1
+
+    This function repairs that so routes always register under:
+        /api/v1
+    """
+
+    raw_prefix = getattr(settings, "API_V1_PREFIX", "/api/v1") or "/api/v1"
+    prefix = str(raw_prefix).strip().replace("\\", "/")
+
+    if not prefix:
+        return "/api/v1"
+
+    lower_prefix = prefix.lower()
+
+    # Fix Git Bash / MSYS path conversion:
+    # /C:/Program Files/Git/api/v1 -> /api/v1
+    api_marker_index = lower_prefix.rfind("/api/")
+    if ":/" in prefix and api_marker_index != -1:
+        prefix = prefix[api_marker_index:]
+
+    # If env is set as api/v1, make it /api/v1
+    if not prefix.startswith("/"):
+        prefix = f"/{prefix}"
+
+    # Remove trailing slash except root
+    prefix = prefix.rstrip("/")
+
+    return prefix or "/api/v1"
+
+
+API_PREFIX = get_api_prefix()
 
 
 def prepare_upload_directories() -> None:
@@ -124,14 +168,13 @@ def load_models_for_table_creation() -> None:
     Import model files so SQLAlchemy registers their tables.
 
     Important:
-    We now use the catalogue model files:
+    We use the catalogue model files:
         app.models.service
         app.models.product
         app.models.banner
 
-    Do not import the old app.models.service_booking or
-    app.models.product_request files here, because the new service.py and
-    product.py files already include those tables.
+    Do not import old duplicate service_booking or product_request files here
+    if the new service.py and product.py files already include those tables.
     """
 
     model_modules = [
@@ -156,9 +199,6 @@ def create_database_tables() -> None:
 
     This is useful for development and early deployment.
     Later, for production, use Alembic migrations instead of automatic create_all.
-
-    This function is protected so a database issue does not stop /health
-    from loading.
     """
 
     try:
@@ -227,7 +267,8 @@ def create_app() -> FastAPI:
             "app_name": settings.APP_NAME,
             "environment": settings.APP_ENV,
             "docs": "/docs",
-            "api_prefix": settings.API_V1_PREFIX,
+            "api_prefix": API_PREFIX,
+            "raw_api_prefix": getattr(settings, "API_V1_PREFIX", None),
             "uploads": "/uploads",
             "runtime": "vercel" if is_vercel_runtime() else "local",
             "uploads_dir": str(UPLOADS_DIR),
@@ -243,16 +284,17 @@ def create_app() -> FastAPI:
             "uploads_dir": str(UPLOADS_DIR),
         }
 
-    @app.get(f"{settings.API_V1_PREFIX}/health", tags=["Health"])
+    @app.get(f"{API_PREFIX}/health", tags=["Health"])
     def api_health_check() -> dict[str, Any]:
         return {
             "success": True,
             "status": "healthy",
             "message": "Astra Group API v1 is healthy.",
             "runtime": "vercel" if is_vercel_runtime() else "local",
+            "api_prefix": API_PREFIX,
         }
 
-    @app.get(f"{settings.API_V1_PREFIX}/db-health", tags=["Health"])
+    @app.get(f"{API_PREFIX}/db-health", tags=["Health"])
     def database_health_check() -> dict[str, Any]:
         result = test_database_connection()
         status_value = "connected" if result.get("connected") else "failed"
@@ -263,7 +305,7 @@ def create_app() -> FastAPI:
             **result,
         }
 
-    @app.get(f"{settings.API_V1_PREFIX}/tables", tags=["Health"])
+    @app.get(f"{API_PREFIX}/tables", tags=["Health"])
     def database_tables_check() -> dict[str, Any]:
         """
         Shows SQLAlchemy registered tables.
@@ -321,7 +363,7 @@ def register_optional_router(app: FastAPI, module_path: str, router_name: str) -
     """
     Loads a route module if it exists and includes it in the FastAPI app.
 
-    This uses find_spec first so that real import errors inside a route file
+    Uses find_spec first so that real import errors inside a route file
     are not silently hidden.
     """
 
@@ -329,14 +371,20 @@ def register_optional_router(app: FastAPI, module_path: str, router_name: str) -
         print(f"Route not found yet, skipped: {module_path}")
         return
 
-    module = import_module(module_path)
+    try:
+        module = import_module(module_path)
+    except Exception as exc:
+        print(f"Route import failed: {module_path} | {exc}")
+        raise
+
     router = getattr(module, router_name, None)
 
-    if router is not None:
-        app.include_router(router, prefix=settings.API_V1_PREFIX)
-        print(f"Route loaded: {module_path}")
-    else:
+    if router is None:
         print(f"No router found in: {module_path}")
+        return
+
+    app.include_router(router, prefix=API_PREFIX)
+    print(f"Route loaded: {module_path} -> {API_PREFIX}")
 
 
 app = create_app()

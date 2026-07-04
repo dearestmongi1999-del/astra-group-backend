@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
+import secrets
 
 from fastapi import HTTPException, status
 from sqlalchemy import or_
@@ -71,6 +74,59 @@ def create_user(db: Session, user_in: UserCreate | UserCreateAdmin) -> User:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="A user with this email or phone already exists.",
+        )
+
+    db.refresh(user)
+    return user
+
+
+def create_oauth_user(
+    db: Session,
+    *,
+    email: str,
+    full_name: str | None = None,
+    role: str = UserRole.CUSTOMER.value,
+) -> User:
+    """
+    Creates a user coming from Google OAuth.
+
+    The current users table requires password_hash to be non-null, so this
+    stores a random unusable password hash. The user can still reset password
+    later through the normal forgot-password flow if that is implemented.
+    """
+    cleaned_email = normalize_email(email)
+    existing_user = get_user_by_email(db, cleaned_email)
+    if existing_user:
+        return existing_user
+
+    cleaned_name = (full_name or "").strip()
+    if not cleaned_name:
+        cleaned_name = cleaned_email.split("@")[0].replace(".", " ").title() or "Astra User"
+
+    random_unusable_password = secrets.token_urlsafe(48)
+
+    user = User(
+        full_name=cleaned_name,
+        email=cleaned_email,
+        phone=None,
+        password_hash=hash_password(random_unusable_password),
+        role=role,
+        is_active=True,
+        is_verified=True,
+    )
+
+    db.add(user)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing_user = get_user_by_email(db, cleaned_email)
+        if existing_user:
+            return existing_user
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A user with this email already exists.",
         )
 
     db.refresh(user)

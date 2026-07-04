@@ -50,6 +50,14 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
     # ---------------------------------------------------------
+    # Google OAuth Login
+    # ---------------------------------------------------------
+    GOOGLE_CLIENT_ID: str | None = None
+    GOOGLE_CLIENT_SECRET: str | None = None
+    GOOGLE_REDIRECT_URI: str = "http://localhost:8000/api/v1/auth/google/callback"
+    FRONTEND_URL: str = "http://localhost:3000"
+
+    # ---------------------------------------------------------
     # Admin notifications
     # ---------------------------------------------------------
     ADMIN_EMAIL: str | None = None
@@ -75,7 +83,6 @@ class Settings(BaseSettings):
     WHATSAPP_PROVIDER: str = "manual"
     WHATSAPP_BUSINESS_NUMBER: str | None = None
 
-    # Future WhatsApp Cloud API support
     WHATSAPP_CLOUD_ACCESS_TOKEN: str | None = None
     WHATSAPP_CLOUD_PHONE_NUMBER_ID: str | None = None
     WHATSAPP_CLOUD_API_VERSION: str = "v20.0"
@@ -107,9 +114,6 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> List[str]:
-        """
-        Converts comma-separated ALLOWED_ORIGINS from .env into a Python list.
-        """
         if not self.ALLOWED_ORIGINS:
             return []
 
@@ -121,12 +125,6 @@ class Settings(BaseSettings):
 
     @property
     def allowed_image_extensions_list(self) -> List[str]:
-        """
-        Converts ALLOWED_IMAGE_EXTENSIONS into a clean list.
-
-        Example:
-            jpg,jpeg,png,webp -> ["jpg", "jpeg", "png", "webp"]
-        """
         if not self.ALLOWED_IMAGE_EXTENSIONS:
             return []
 
@@ -138,12 +136,6 @@ class Settings(BaseSettings):
 
     @property
     def default_service_types_list(self) -> List[str]:
-        """
-        Converts DEFAULT_SERVICE_TYPES into a list.
-
-        Example:
-            cleaning,fumigation -> ["cleaning", "fumigation"]
-        """
         if not self.DEFAULT_SERVICE_TYPES:
             return []
 
@@ -155,9 +147,6 @@ class Settings(BaseSettings):
 
     @property
     def max_upload_size_bytes(self) -> int:
-        """
-        Converts MAX_UPLOAD_SIZE_MB into bytes.
-        """
         return self.MAX_UPLOAD_SIZE_MB * 1024 * 1024
 
     @property
@@ -170,9 +159,6 @@ class Settings(BaseSettings):
 
     @property
     def email_configured(self) -> bool:
-        """
-        Checks if email has enough settings to send SMTP emails.
-        """
         return bool(
             self.EMAIL_ENABLED
             and self.EMAIL_HOST
@@ -183,12 +169,18 @@ class Settings(BaseSettings):
 
     @property
     def whatsapp_configured(self) -> bool:
-        """
-        Checks if manual WhatsApp links can be generated.
-        """
         return bool(
             self.WHATSAPP_ENABLED
             and self.WHATSAPP_BUSINESS_NUMBER
+        )
+
+    @property
+    def google_oauth_configured(self) -> bool:
+        return bool(
+            self.GOOGLE_CLIENT_ID
+            and self.GOOGLE_CLIENT_SECRET
+            and self.GOOGLE_REDIRECT_URI
+            and self.FRONTEND_URL
         )
 
 
